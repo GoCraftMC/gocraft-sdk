@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -35,8 +36,9 @@ func Try(fn func()) (err error) {
 
 // Class is a loaded Java class.
 type Class struct {
-	obj  Object
-	Name string
+	obj     Object
+	Name    string
+	methods sync.Map
 }
 
 // JavaObject implements Objecter, giving access to the java.lang.Class instance.
@@ -113,6 +115,14 @@ func paramKinds(desc string) (params string, ret byte) {
 }
 
 func (c *Class) findMethod(name, desc string, static bool) *Method {
+	key := name + desc
+	if static {
+		key = "static " + key
+	}
+	if m, ok := c.methods.Load(key); ok {
+		return m.(*Method)
+	}
+
 	var out C.i64
 	isStatic := C.i64(0)
 	if static {
@@ -131,7 +141,9 @@ func (c *Class) findMethod(name, desc string, static bool) *Method {
 	if name == "<init>" {
 		ret = 'L'
 	}
-	return &Method{id: int64(out), params: params, ret: ret, static: static || name == "<init>", label: c.Name + "." + name + desc}
+	method := &Method{id: int64(out), params: params, ret: ret, static: static || name == "<init>", label: c.Name + "." + name + desc}
+	c.methods.Store(key, method)
+	return method
 }
 
 // Method resolves an instance method, including private and inherited ones.
@@ -365,10 +377,9 @@ func (f *Field) SetStatic(value any) { f.Set(Object{}, value) }
 // LazyMethod resolves on first use, so a package var can name a client-only class without touching
 // it on a dedicated server.
 type LazyMethod struct {
-	once              sync.Once
 	class, name, desc string
 	static            bool
-	method            *Method
+	method            atomic.Pointer[Method]
 }
 
 // M declares a lazily resolved instance method.
@@ -386,9 +397,15 @@ func Ctor(class, desc string) *LazyMethod {
 	return &LazyMethod{class: class, name: "<init>", desc: desc, static: true}
 }
 
+// get is not a sync.Once because a failed lookup must stay retryable: a mod may probe for an optional
+// class with Try, and using one too early should not poison it for later.
 func (l *LazyMethod) get() *Method {
-	l.once.Do(func() { l.method = FindClass(l.class).findMethod(l.name, l.desc, l.static) })
-	return l.method
+	if m := l.method.Load(); m != nil {
+		return m
+	}
+	m := FindClass(l.class).findMethod(l.name, l.desc, l.static)
+	l.method.Store(m)
+	return m
 }
 
 // Call invokes the method on recv.
@@ -399,10 +416,9 @@ func (l *LazyMethod) CallStatic(args ...any) Value { return l.get().CallStatic(a
 
 // LazyField resolves on first use.
 type LazyField struct {
-	once              sync.Once
 	class, name, desc string
 	static            bool
-	field             *Field
+	field             atomic.Pointer[Field]
 }
 
 // F declares a lazily resolved instance field.
@@ -414,8 +430,12 @@ func SF(class, name, desc string) *LazyField {
 }
 
 func (l *LazyField) get() *Field {
-	l.once.Do(func() { l.field = FindClass(l.class).findField(l.name, l.desc, l.static) })
-	return l.field
+	if f := l.field.Load(); f != nil {
+		return f
+	}
+	f := FindClass(l.class).findField(l.name, l.desc, l.static)
+	l.field.Store(f)
+	return f
 }
 
 // Get reads the field on recv.

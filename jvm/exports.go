@@ -99,6 +99,11 @@ func gocraft_dispatch(cb C.int64_t, args unsafe.Pointer, n C.int64_t, ret unsafe
 	return statusOK
 }
 
+// gocraft_release_callback is called when the Java proxy using a callback has been collected.
+//
+//export gocraft_release_callback
+func gocraft_release_callback(cb C.int64_t) { forgetCallback(int64(cb)) }
+
 // encodePanic turns a recovered value into a status for Java. A Java exception that unwound through
 // Go goes back unchanged, so Java sees its original type and stack.
 func encodePanic(r any, ret unsafe.Pointer) C.int {

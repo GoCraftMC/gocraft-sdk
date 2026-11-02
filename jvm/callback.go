@@ -29,13 +29,26 @@ type callbackEntry struct {
 var (
 	callbacks      sync.Map
 	nextCallbackID atomic.Int64
+	liveCallbacks  atomic.Int64
 )
 
 func registerCallback(fn Callback, params string, ret byte) int64 {
 	id := nextCallbackID.Add(1)
 	callbacks.Store(id, &callbackEntry{fn: fn, params: params, ret: ret})
+	liveCallbacks.Add(1)
 	return id
 }
+
+func forgetCallback(id int64) {
+	if _, loaded := callbacks.LoadAndDelete(id); loaded {
+		liveCallbacks.Add(-1)
+	}
+}
+
+// CallbackCount returns how many Go functions Java can currently call, for finding leaks. A proxy's
+// functions are freed once both Go and Java have dropped it. A closure holding a reference to its own
+// proxy keeps it alive, because the two runtimes' collectors cannot see a cycle spanning both.
+func CallbackCount() int64 { return liveCallbacks.Load() }
 
 func lookupCallback(id int64) *callbackEntry {
 	entry, ok := callbacks.Load(id)
@@ -135,6 +148,10 @@ func compileImpl(methods Impl, withSelf bool) (spec string, ids []int64) {
 func Proxy(iface *Class, methods Impl) Object {
 	requireBooted()
 	spec, ids := compileImpl(methods, false)
+
+	if len(ids) == 0 {
+		panic("jvm: Proxy needs at least one method")
+	}
 
 	var out C.i64
 	status := C.c_proxy(C.i64(token), C.i64(iface.obj.id()), strAddr(spec), C.i64(len(spec)), ptrAddr(&ids[0]), ptrAddr(&out))

@@ -13,7 +13,14 @@ import (
 )
 
 // ref owns a handle. The JVM object it names stays alive at least as long as the ref.
-type ref struct{ id int64 }
+//
+// The pointer field keeps refs out of Go's tiny allocator, which packs small pointer-free objects into
+// shared blocks that die together. A ref sharing a block with a callback's boxed id could then never be
+// collected: the id lives until the proxy is collected, and the proxy lives until the ref is released.
+type ref struct {
+	id     int64
+	noTiny *byte
+}
 
 // Object is a reference to a Java object. The zero value is Java's null.
 type Object struct{ r *ref }
@@ -71,6 +78,7 @@ func dupHandle(o Object) int64 {
 
 // Same reports whether a and b are the same Java object (Java's ==).
 func Same(a, b Objecter) bool {
+	requireBooted()
 	x, y := a.JavaObject(), b.JavaObject()
 	same := C.c_same(C.i64(x.id()), C.i64(y.id())) != 0
 	runtime.KeepAlive(x.r)
@@ -87,6 +95,7 @@ func (o Object) IsInstance(c *Class) bool {
 
 // ClassOf returns o's runtime class, or an empty Object for null.
 func (o Object) ClassOf() Object {
+	requireBooted()
 	result := wrap(int64(C.c_class_of(C.i64(o.id()))))
 	runtime.KeepAlive(o.r)
 	return result
@@ -101,7 +110,10 @@ func (o Object) String() string {
 }
 
 // NewString creates a java.lang.String.
-func NewString(s string) Object { return wrap(newStringHandle(s)) }
+func NewString(s string) Object {
+	requireBooted()
+	return wrap(newStringHandle(s))
+}
 
 func newStringHandle(s string) int64 {
 	id := int64(C.c_string_new(strAddr(s), C.i64(len(s))))
@@ -130,6 +142,7 @@ func readString(o Object) string {
 
 // ArrayLen returns the length of a Java array.
 func ArrayLen(o Objecter) int {
+	requireBooted()
 	obj := o.JavaObject()
 	n := int(C.c_array_len(C.i64(obj.id())))
 	runtime.KeepAlive(obj.r)
@@ -138,6 +151,7 @@ func ArrayLen(o Objecter) int {
 
 // NewBytes copies b into a new Java byte[].
 func NewBytes(b []byte) Object {
+	requireBooted()
 	id := int64(C.c_bytes_new(addr(b), C.i64(len(b))))
 	runtime.KeepAlive(b)
 	return wrap(id)
@@ -145,6 +159,7 @@ func NewBytes(b []byte) Object {
 
 // Bytes copies a Java byte[] into a new Go slice.
 func Bytes(o Objecter) []byte {
+	requireBooted()
 	obj := o.JavaObject()
 	n := int64(C.c_bytes_read(C.i64(obj.id()), nil, 0))
 	if n <= 0 {
@@ -167,8 +182,19 @@ const (
 	LevelError = 3
 )
 
-// Log writes to this mod's logger in the game log.
+// Log writes to this mod's logger in the game log. Logging from package init is fine: messages wait
+// until the mod has booted.
 func Log(level int, message string) {
+	if !booted.Load() {
+		entryMu.Lock()
+		if !booted.Load() {
+			bootOnce = append(bootOnce, func() { Log(level, message) })
+			entryMu.Unlock()
+			return
+		}
+		entryMu.Unlock()
+	}
+
 	C.c_log(C.i64(token), C.i64(level), strAddr(message), C.i64(len(message)))
 	runtime.KeepAlive(message)
 }
