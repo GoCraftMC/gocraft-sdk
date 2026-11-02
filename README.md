@@ -29,4 +29,4 @@ C compiler. See the [documentation](https://github.com/GoCraftMC/gocraft-docs).
 
 ## License
 
-BSD-4-Clause. This product includes software developed by The GoCraft Authors.
+BSD-3-Clause.
